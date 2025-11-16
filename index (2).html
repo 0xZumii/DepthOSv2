@@ -1,0 +1,2704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DepthOS Terminal</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a0a;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        #terminal {
+            width: 100%;
+            height: 100vh;
+            background: #0d0d0d;
+            color: #00ff88;
+            padding: 20px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        #terminal::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        #terminal::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+
+        #terminal::-webkit-scrollbar-thumb {
+            background: #2a5a3a;
+            border-radius: 4px;
+        }
+
+        #terminal::-webkit-scrollbar-thumb:hover {
+            background: #3a7a4a;
+        }
+
+        .output-line {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .prompt {
+            color: #00ffff;
+        }
+
+        .error {
+            color: #ff5555;
+        }
+
+        .highlight {
+            color: #ff88ff;
+        }
+
+        .gold {
+            color: #ffaa00;
+        }
+
+        .cyan {
+            color: #00ffff;
+        }
+
+        .dim {
+            color: #666;
+        }
+
+        .success {
+            color: #00ff88;
+        }
+
+        .input-line {
+            display: flex;
+            align-items: center;
+        }
+
+        #input {
+            background: transparent;
+            border: none;
+            color: #00ff88;
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+            flex: 1;
+            caret-color: #00ff88;
+        }
+
+        .cursor-blink {
+            animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        .ascii-art {
+            color: #ff88ff;
+            line-height: 1.2;
+        }
+
+        .layer-bar {
+            display: inline-block;
+            background: linear-gradient(90deg, #00ff88, #00ffff);
+            height: 12px;
+            border-radius: 2px;
+            margin-right: 10px;
+        }
+
+        .status-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #1a1a1a;
+            padding: 8px 20px;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid #333;
+            z-index: 100;
+        }
+
+        .status-item {
+            color: #666;
+        }
+
+        .status-value {
+            color: #00ff88;
+        }
+
+        #terminal {
+            padding-top: 50px;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar">
+        <div class="status-item">
+            $DEPTH: <span class="status-value" id="depth-balance">0</span>
+        </div>
+        <div class="status-item">
+            STREAK: <span class="status-value" id="streak-count">0</span> days
+        </div>
+        <div class="status-item">
+            STATUS: <span class="status-value" id="sync-status">connecting...</span>
+        </div>
+    </div>
+
+    <div id="terminal">
+        <div id="output"></div>
+        <div class="input-line">
+            <span class="prompt">depth@os:~$ </span>
+            <input type="text" id="input" autofocus autocomplete="off" spellcheck="false">
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
+
+    <script>
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyDOQoJ9rBGv-bP19wVBMLS9LSL2vB-dxVk",
+            authDomain: "depthos.firebaseapp.com",
+            projectId: "depthos",
+            storageBucket: "depthos.firebasestorage.app",
+            messagingSenderId: "999027116486",
+            appId: "1:999027116486:web:5821ef4bd850ebfe648ac7",
+            measurementId: "G-WS7RN6FMBW"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        // User state
+        let currentUser = null;
+        let userData = {
+            depthBalance: 0,
+            currentStreak: 0,
+            lastActiveDate: null,
+            totalShadowWorks: 0,
+            completedLayers: [],
+            journalEntries: [],
+            achievements: [],
+            createdAt: null
+        };
+
+        // DOM elements
+        const output = document.getElementById('output');
+        const input = document.getElementById('input');
+        const terminal = document.getElementById('terminal');
+        const depthBalanceEl = document.getElementById('depth-balance');
+        const streakCountEl = document.getElementById('streak-count');
+        const syncStatusEl = document.getElementById('sync-status');
+
+        let commandHistory = [];
+        let historyIndex = -1;
+        let wizardState = null;
+
+        // Update UI
+        function updateStatusBar() {
+            depthBalanceEl.textContent = userData.depthBalance.toLocaleString();
+            streakCountEl.textContent = userData.currentStreak;
+        }
+
+        // Firebase Auth - Anonymous sign in
+        async function initAuth() {
+            try {
+                syncStatusEl.textContent = 'authenticating...';
+                const userCredential = await auth.signInAnonymously();
+                currentUser = userCredential.user;
+                syncStatusEl.textContent = 'loading data...';
+                await loadUserData();
+                syncStatusEl.textContent = 'synced ✓';
+                updateStatusBar();
+                return true;
+            } catch (error) {
+                console.error('Auth error:', error);
+                syncStatusEl.textContent = 'offline mode';
+                return false;
+            }
+        }
+
+        // Load user data from Firestore
+        async function loadUserData() {
+            if (!currentUser) return;
+            
+            const docRef = db.collection('users').doc(currentUser.uid);
+            const doc = await docRef.get();
+            
+            if (doc.exists) {
+                userData = { ...userData, ...doc.data() };
+                // Check and update streak
+                await checkStreak();
+            } else {
+                // New user - create document
+                userData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+                userData.lastActiveDate = new Date().toISOString().split('T')[0];
+                await docRef.set(userData);
+            }
+        }
+
+        // Save user data to Firestore
+        async function saveUserData() {
+            if (!currentUser) return;
+            
+            try {
+                await db.collection('users').doc(currentUser.uid).update(userData);
+                syncStatusEl.textContent = 'synced ✓';
+            } catch (error) {
+                console.error('Save error:', error);
+                syncStatusEl.textContent = 'sync failed';
+            }
+        }
+
+        // Check and update streak
+        async function checkStreak() {
+            const today = new Date().toISOString().split('T')[0];
+            const lastActive = userData.lastActiveDate;
+            
+            if (!lastActive) {
+                userData.currentStreak = 1;
+                userData.lastActiveDate = today;
+            } else if (lastActive === today) {
+                // Already active today, no change
+            } else {
+                const lastDate = new Date(lastActive);
+                const todayDate = new Date(today);
+                const diffDays = Math.floor((todayDate - lastDate) / (1000 * 60 * 60 * 24));
+                
+                if (diffDays === 1) {
+                    // Consecutive day - increment streak
+                    userData.currentStreak += 1;
+                    userData.lastActiveDate = today;
+                    
+                    // Check for streak milestones
+                    if (userData.currentStreak === 7) {
+                        await awardDepth(50, '7-day streak bonus!');
+                    } else if (userData.currentStreak === 30) {
+                        await awardDepth(500, '30-day streak bonus! 🔥');
+                    } else if (userData.currentStreak === 100) {
+                        await awardDepth(2000, '100-day streak! LEGENDARY 🏆');
+                    }
+                } else if (diffDays > 1) {
+                    // Streak broken
+                    userData.currentStreak = 1;
+                    userData.lastActiveDate = today;
+                }
+            }
+            
+            await saveUserData();
+        }
+
+        // Award $DEPTH tokens
+        async function awardDepth(amount, reason) {
+            userData.depthBalance += amount;
+            updateStatusBar();
+            await saveUserData();
+            
+            addLine(`\n<span class="gold">✨ +${amount} $DEPTH</span> <span class="dim">${reason}</span>\n`);
+        }
+
+        // Log activity (for streak maintenance)
+        async function logActivity(type, data = {}) {
+            if (!currentUser) return;
+            
+            const activity = {
+                type,
+                timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                ...data
+            };
+            
+            await db.collection('users').doc(currentUser.uid)
+                .collection('activities').add(activity);
+            
+            // Update last active date
+            const today = new Date().toISOString().split('T')[0];
+            if (userData.lastActiveDate !== today) {
+                await checkStreak();
+            }
+        }
+
+        // Fake filesystem
+        const filesystem = {
+            '/': ['home', 'etc', 'var', 'dev', 'mnt'],
+            '/home': ['depth'],
+            '/home/depth': ['manifesto.txt', 'layers.json', 'shadow.log', '.depth_config', 'my_journal.txt'],
+            '/etc': ['depth.conf', 'protocols.d'],
+            '/dev': ['depth', 'growth', 'shadow'],
+            '/mnt': ['consciousness']
+        };
+
+        const files = {
+            'manifesto.txt': `
+THE DEPTH PROTOCOL MANIFESTO
+=============================
+
+We believe technology should serve human depth, not diminish it.
+
+In a world optimizing for engagement, we optimize for growth.
+In a world measuring wealth, we measure wisdom.
+In a world proving work, we prove transformation.
+
+The Depth Protocol is not another blockchain project.
+It is a framework for conscious evolution, encoded in code.
+
+Our 12 layers are not arbitrary. They are the architecture of wholeness.
+From safety to generativity, from survival to transcendence.
+
+$DEPTH is not a token to speculate on.
+It is proof that you showed up for yourself today.
+
+We don't ask "what did you produce?"
+We ask "how did you grow?"
+
+Ship fast. Grow deep. Touch grass occasionally.
+
+This is the way.
+
+— The Depth Protocol
+`,
+            'layers.json': `{
+  "architecture": "12-Layer Consciousness Stack",
+  "version": "1.0.0",
+  "layers": [
+    { "id": 0, "name": "Safety & Stability", "status": "foundation" },
+    { "id": 1, "name": "Bodily Integrity", "status": "active" },
+    { "id": 2, "name": "Financial Stability", "status": "active" },
+    { "id": 3, "name": "Relational Security", "status": "active" },
+    { "id": 4, "name": "Identity Coherence", "status": "active" },
+    { "id": 5, "name": "Emotional Fluency", "status": "active" },
+    { "id": 6, "name": "Cognitive Clarity", "status": "active" },
+    { "id": 7, "name": "Creative Expression", "status": "active" },
+    { "id": 8, "name": "Purpose Alignment", "status": "active" },
+    { "id": 9, "name": "Transcendent Connection", "status": "active" },
+    { "id": 10, "name": "Integrated Wholeness", "status": "active" },
+    { "id": 11, "name": "Generative Contribution", "status": "peak" }
+  ]
+}`,
+            '.depth_config': `# DepthOS Configuration
+PROOF_OF_GROWTH=enabled
+SHADOW_WORK=active
+VIBES=immaculate
+NETWORK=base
+CONTRACT=0x0c3509abda82ab64de2ce67018cecb4de7afeb07
+CONSCIOUSNESS_LEVEL=expanding`,
+            'shadow.log': `[2024-01-15] Acknowledged perfectionism pattern
+[2024-01-22] Integrated fear of failure
+[2024-02-03] Released need for external validation
+[2024-02-14] Embraced vulnerability as strength
+[2024-03-01] Shadow work continues...`,
+            'my_journal.txt': `Your journal entries will appear here.
+Use 'depth-journal' to add new entries.`
+        };
+
+        // Command implementations
+        const commands = {
+            help: () => `
+<span class="highlight">DEPTHOS COMMAND REFERENCE</span>
+<span class="dim">═══════════════════════════════</span>
+
+<span class="cyan">DEPTH PROTOCOL COMMANDS:</span>
+  depth-start       Interactive onboarding wizard
+  depth-layers      Display the full architecture
+  depth-layer[0-12] Deep dive into specific layer
+  depth-apps        Browse official app suite
+  depth-plugins     Browse community plugins
+  depth-shadow      Interactive shadow work exercise
+  depth-qstate      Q-State identity selector
+  depth-token       $DEPTH token information
+  depth-earn        How to earn $DEPTH tokens
+  depth-manifest    Display the Depth Manifesto
+  depth-journal     Add a journal entry (+10 $DEPTH)
+  depth-reflect     Daily reflection prompt (+25 $DEPTH)
+  depth-stats       View your growth statistics
+
+<span class="cyan">SYSTEM COMMANDS:</span>
+  neofetch          System information
+  ls [path]         List directory contents
+  cat [file]        Read file contents
+  pwd               Print working directory
+  clear             Clear terminal
+  help              Show this help message
+
+<span class="dim">Pro tip: Run 'depth-apps' to see all runnable applications!</span>
+`,
+
+            'depth-stats': async () => {
+                await logActivity('view_stats');
+                const layerCount = userData.completedLayers.filter(l => l.includes('_deep')).length;
+                return `
+<span class="highlight">YOUR GROWTH STATISTICS</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="gold">$DEPTH Balance:</span>      ${userData.depthBalance.toLocaleString()} tokens
+<span class="gold">Current Streak:</span>      ${userData.currentStreak} days
+<span class="gold">Shadow Works:</span>        ${userData.totalShadowWorks} completed
+<span class="gold">Journal Entries:</span>     ${userData.journalEntries.length} written
+<span class="gold">Layers Explored:</span>     ${layerCount}/13
+
+<span class="error">FOUNDATION</span>
+  ${userData.completedLayers.includes('layer0_deep') ? '✓' : '○'} Layer 0: Safety & Stability Protocol
+
+<span class="cyan">TIER 1: FOUNDATIONAL SELF</span>
+  ${userData.completedLayers.includes('layer1_deep') ? '✓' : '○'} Layer 1: The Observer Node
+  ${userData.completedLayers.includes('layer2_deep') ? '✓' : '○'} Layer 2: The L$D Framework
+  ${userData.completedLayers.includes('layer3_deep') ? '✓' : '○'} Layer 3: The Gödel Loop
+
+<span class="cyan">TIER 2: CONSCIOUS ARCHITECT</span>
+  ${userData.completedLayers.includes('layer4_deep') ? '✓' : '○'} Layer 4: The Q-State Engine
+  ${userData.completedLayers.includes('layer5_deep') ? '✓' : '○'} Layer 5: The Entropy Monitor
+  ${userData.completedLayers.includes('layer6_deep') ? '✓' : '○'} Layer 6: The Fractal Kernel
+  ${userData.completedLayers.includes('layer7_deep') ? '✓' : '○'} Layer 7: The Mythmaker Engine
+
+<span class="cyan">TIER 3: INTEGRATED SAGE</span>
+  ${userData.completedLayers.includes('layer8_deep') ? '✓' : '○'} Layer 8: The Symbolic Engine
+  ${userData.completedLayers.includes('layer9_deep') ? '✓' : '○'} Layer 9: The Turing Emulator
+  ${userData.completedLayers.includes('layer10_deep') ? '✓' : '○'} Layer 10: The Mirror Protocol
+  ${userData.completedLayers.includes('layer11_deep') ? '✓' : '○'} Layer 11: The Cosmic Clock
+  ${userData.completedLayers.includes('layer12_deep') ? '✓' : '○'} Layer 12: The Void Kernel
+
+<span class="cyan">STREAK MILESTONES:</span>
+  ${userData.currentStreak >= 7 ? '✓' : '○'} 7-day streak    (+50 $DEPTH)
+  ${userData.currentStreak >= 30 ? '✓' : '○'} 30-day streak   (+500 $DEPTH)
+  ${userData.currentStreak >= 100 ? '✓' : '○'} 100-day streak  (+2000 $DEPTH)
+
+<span class="dim">Keep showing up. Consistency compounds.</span>
+`;
+            },
+
+            'depth-journal': () => {
+                wizardState = { step: 'journal-prompt' };
+                return `
+<span class="highlight">JOURNAL ENTRY</span>
+<span class="dim">━━━━━━━━━━━━━━</span>
+
+Journaling is proof of inner work.
+Write what's true for you right now.
+
+<span class="cyan">What's alive in you today?</span>
+<span class="dim">(Type your entry and press Enter. Min 20 characters for $DEPTH reward)</span>
+`;
+            },
+
+            'depth-reflect': () => {
+                wizardState = { step: 'reflect-prompt' };
+                const prompts = [
+                    "What pattern did you notice in yourself today?",
+                    "What are you avoiding that needs your attention?",
+                    "Where did you grow today, even slightly?",
+                    "What would you do if you weren't afraid?",
+                    "What truth are you not speaking?",
+                    "What boundary do you need to set?",
+                    "What are you grateful for that you usually overlook?",
+                    "What childhood wound showed up today?",
+                    "Where are you seeking external validation?",
+                    "What does your future self need you to do today?"
+                ];
+                const prompt = prompts[Math.floor(Math.random() * prompts.length)];
+                
+                return `
+<span class="highlight">DAILY REFLECTION</span>
+<span class="dim">━━━━━━━━━━━━━━━━━</span>
+
+<span class="gold">${prompt}</span>
+
+<span class="dim">Take your time. This is for you.</span>
+<span class="dim">(Type your reflection and press Enter. Min 50 characters for full $DEPTH reward)</span>
+`;
+            },
+
+            'depth-start': () => {
+                wizardState = { step: 'welcome' };
+                return `
+<span class="ascii-art">
+    ____             __  __    ____  _____
+   / __ \\___  ____  / /_/ /_  / __ \\/ ___/
+  / / / / _ \\/ __ \\/ __/ __ \\/ / / /\\__ \\ 
+ / /_/ /  __/ /_/ / /_/ / / / /_/ /___/ / 
+/_____/\\___/ .___/\\__/_/ /_/\\____//____/  
+          /_/                              
+</span>
+
+<span class="highlight">Welcome to the Depth Protocol</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You've found your way here. That means something.
+
+The Depth Protocol is a framework for conscious evolution.
+We don't measure what you produce. We measure how you grow.
+
+<span class="cyan">Before we begin, what brings you here today?</span>
+
+  [1] I want to understand the 12-layer framework
+  [2] I'm interested in $DEPTH tokenomics  
+  [3] I want to do some shadow work
+  [4] Just exploring, show me everything
+  [5] Skip intro, I know what I'm doing
+
+<span class="dim">Type a number and press Enter...</span>
+`;
+            },
+
+            'depth-layers': async () => {
+                await logActivity('view_layers');
+                if (!userData.completedLayers.includes('layers_overview')) {
+                    userData.completedLayers.push('layers_overview');
+                    await awardDepth(15, 'Explored the 12-layer architecture');
+                }
+                return `
+<span class="highlight">THE DEPTH PROTOCOL ARCHITECTURE</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="error">LAYER 0: SAFETY & STABILITY PROTOCOL</span>
+<span class="dim">The Foundation - Prerequisite for All Operations</span>
+<span class="gold">Run 'depth-layer0' first. This is non-negotiable.</span>
+
+<span class="gold">TIER 1: THE FOUNDATIONAL SELF</span>
+<span class="dim">Achieving Operational Stability</span>
+
+<span class="cyan">LAYER 1:</span>  The Observer Node      <span class="dim">Awareness & Detachment</span>
+<span class="cyan">LAYER 2:</span>  The L$D Framework      <span class="dim">Stability & Operation</span>
+<span class="cyan">LAYER 3:</span>  The Gödel Loop         <span class="dim">Paradox & Self-Honesty</span>
+
+<span class="gold">TIER 2: THE CONSCIOUS ARCHITECT</span>
+<span class="dim">Designing Your Reality</span>
+
+<span class="cyan">LAYER 4:</span>  The Q-State Engine     <span class="dim">Identity & Possibility</span>
+<span class="cyan">LAYER 5:</span>  The Entropy Monitor    <span class="dim">Maintenance & Energy</span>
+<span class="cyan">LAYER 6:</span>  The Fractal Kernel     <span class="dim">Habits & Scale</span>
+<span class="cyan">LAYER 7:</span>  The Mythmaker Engine   <span class="dim">Narrative & Meaning</span>
+
+<span class="gold">TIER 3: THE INTEGRATED SAGE</span>
+<span class="dim">Mastering Consciousness</span>
+
+<span class="cyan">LAYER 8:</span>  The Symbolic Engine    <span class="dim">Perception & Intuition</span>
+<span class="cyan">LAYER 9:</span>  The Turing Emulator    <span class="dim">Perspective & Simulation</span>
+<span class="cyan">LAYER 10:</span> The Mirror Protocol    <span class="dim">Shadow & Integration</span>
+<span class="cyan">LAYER 11:</span> The Cosmic Clock       <span class="dim">Rhythm & Synchronicity</span>
+<span class="highlight">LAYER 12:</span> The Void Kernel        <span class="dim">Stillness & Expansion</span>
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Layer 0 is your security firmware.
+Each tier builds upon the last.
+Master stability before you architect.
+Architect before you integrate.
+
+<span class="dim">Run 'depth-layer0' to begin with the Foundation</span>
+`;
+            },
+
+            'depth-layer0': async () => {
+                await logActivity('view_layer0');
+                if (!userData.completedLayers.includes('layer0_deep')) {
+                    userData.completedLayers.push('layer0_deep');
+                    await awardDepth(30, 'Deep dive into Layer 0 - THE FOUNDATION');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║    LAYER 0: SAFETY & STABILITY PROTOCOL   ║
+║        The Foundation of All Depth         ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">// PRIORITY FIRMWARE - PREREQUISITE FOR ALL OPERATIONS //</span>
+
+<span class="cyan">CORE PRINCIPLE:</span>
+<span class="gold">Safety Enables Depth.</span>
+
+You cannot run advanced software on unstable hardware.
+Layer 0 ensures your hardware—your nervous system and
+sense of self—is secure.
+
+  • Trying to be vulnerable without safety → burnout
+  • Facing shadow without exit strategy → re-traumatization
+  • Connecting deeply from depletion → resentment
+
+<span class="cyan">THE THREE CORE COMPONENTS:</span>
+
+<span class="gold">1. CONTINUOUS SYSTEM MONITOR</span>
+   Your internal early-warning system. Constantly scanning:
+   "Am I in a state where growth is possible?"
+
+<span class="gold">2. CORE STABILITY MAINTENANCE UTILITY</span>
+   Tools to actively maintain presence and agency.
+   Daily, proactive upkeep—not emergency repair.
+
+<span class="gold">3. INTEGRITY ENFORCEMENT FIREWALL</span>
+   The ultimate boundary. Prime directive:
+   <span class="error">Protect the core self at all costs.</span>
+
+<span class="cyan">PROTOCOL 1: THE SAFETY CHECK</span>
+<span class="dim">Run before any demanding activity:</span>
+
+  SCAN:
+    - environment.safety_level (1-10)
+    - internal.energy_level (1-10)
+    - emotional_core.stability (Stable/Volatile)
+  
+  IF ALL levels >= 7: <span class="success">SAFE_TO_PROCEED</span>
+  ELSE: <span class="gold">PRIORITIZE_STABILITY</span>
+
+<span class="cyan">PROTOCOL 2: THE ANCHOR UTILITY</span>
+<span class="dim">Daily maintenance or when stability is low:</span>
+
+  LAYER_1: 5-4-3-2-1 sensory scan
+  LAYER_2: Push palms together, stomp feet
+  LAYER_3: State: "My name is X. I am here. Today is Y."
+
+<span class="cyan">PROTOCOL 3: THE EXIT PROTOCOL</span>
+<span class="dim">When Safety Check returns UNSAFE:</span>
+
+  <span class="error">OVERRIDE ALL OTHER PROCESSES.</span>
+  Relocate to nearest safe zone immediately.
+  Your safety is the only goal.
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="highlight">INTEGRATION:</span>
+
+  → Make Safety Check a habit before everything
+  → Schedule Anchor Time like brushing teeth
+  → Honor Exit Protocol without guilt
+
+Leaving an unsafe situation is not failure.
+<span class="gold">It is the system working as designed. It is wisdom.</span>
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="highlight">// LAYER 0 ACTIVE. SYSTEM SECURE. //</span>
+<span class="highlight">// YOU MAY NOW PROCEED TO TIER 1. //</span>
+
+<span class="dim">Next: depth-layer1 (The Observer Node)</span>
+`;
+            },
+
+            'depth-layer1': async () => {
+                await logActivity('view_layer1');
+                if (!userData.completedLayers.includes('layer1_deep')) {
+                    userData.completedLayers.push('layer1_deep');
+                    await awardDepth(25, 'Deep dive into Layer 1');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║      LAYER 1: THE OBSERVER NODE           ║
+║         Awareness & Detachment             ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 1: THE FOUNDATIONAL SELF</span>
+
+<span class="cyan">FUNCTION:</span>
+The ground state of consciousness. This layer is the silent,
+non-judgmental awareness that witnesses thoughts, feelings,
+and sensations without becoming entangled in them.
+
+<span class="gold">It is the prerequisite for all other layers.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Mindfulness meditation. Noting:
+  <span class="highlight">"I am having the thought that…"</span>
+  instead of
+  <span class="dim">"I am the thought."</span>
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is the base reality from which all Frame Shifting
+  and Q-State exploration is possible. Without the Observer,
+  you are lost in the content of consciousness rather than
+  being aware of consciousness itself.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Can I watch my thoughts without believing them?
+  → Do I identify AS my emotions or notice I'm HAVING them?
+  → When triggered, can I create a gap before reacting?
+  → Is there awareness behind my awareness?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You are not your thoughts.
+You are that which observes them.
+
+<span class="dim">Next layer: depth-layer2 (The L$D Framework)</span>
+`;
+            },
+
+            'depth-layer2': async () => {
+                await logActivity('view_layer2');
+                if (!userData.completedLayers.includes('layer2_deep')) {
+                    userData.completedLayers.push('layer2_deep');
+                    await awardDepth(25, 'Deep dive into Layer 2');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 2: THE L$D FRAMEWORK          ║
+║          Stability & Operation             ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 1: THE FOUNDATIONAL SELF</span>
+
+<span class="cyan">FUNCTION:</span>
+The core operating system for daily life, providing
+stability, value, and choice.
+
+<span class="gold">L-KERNEL:</span> Unshakable self-acceptance and boundary enforcement.
+  Your worth is not negotiable. Your boundaries are not requests.
+
+<span class="gold">$-ECONOMY:</span> Internal value generation through depth and connection.
+  You mint your own value. External validation is a bonus, not a need.
+
+<span class="gold">D-INTERFACE:</span> Conscious, values-aligned action in each moment.
+  Every choice is a vote for who you're becoming.
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is the stable platform required to safely run the
+  advanced "simulations" of the higher layers. Without L$D,
+  you crash when encountering edge cases of life.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Do I accept myself without conditions?
+  → Are my boundaries clear and enforced?
+  → Do I generate my own sense of worth?
+  → Are my daily actions aligned with my values?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+The L$D Framework is your daily operating system.
+When it's stable, everything else can run smoothly.
+
+<span class="dim">Next layer: depth-layer3 (The Gödel Loop)</span>
+`;
+            },
+
+            'depth-layer3': async () => {
+                await logActivity('view_layer3');
+                if (!userData.completedLayers.includes('layer3_deep')) {
+                    userData.completedLayers.push('layer3_deep');
+                    await awardDepth(25, 'Deep dive into Layer 3');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║        LAYER 3: THE GÖDEL LOOP            ║
+║         Paradox & Self-Honesty            ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 1: THE FOUNDATIONAL SELF</span>
+
+<span class="cyan">FUNCTION:</span>
+The processor for cognitive dissonance and life's inherent
+contradictions. It allows you to hold "both/and" statements
+without system failure.
+
+<span class="gold">Named after Kurt Gödel's incompleteness theorems:</span>
+Any sufficiently complex system contains truths that cannot
+be proven within the system itself.
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  When faced with a conflict, asking:
+  <span class="highlight">"What if both of these things are true?
+   What larger truth contains them?"</span>
+
+<span class="cyan">INTEGRATION:</span>
+
+  Enables the Multiverse Mode by allowing contradictory
+  potential selves to coexist without conflict. You can be
+  both strong AND vulnerable, both certain AND questioning.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Can I hold two opposing truths simultaneously?
+  → Do I need everything to "make sense" to accept it?
+  → Where am I forcing an either/or when both/and is true?
+  → What paradox in my life am I resisting?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Life is not binary. The deepest truths are paradoxical.
+Your ability to hold contradiction is your superpower.
+
+<span class="dim">Next layer: depth-layer4 (The Q-State Engine)</span>
+`;
+            },
+
+            'depth-layer4': async () => {
+                await logActivity('view_layer4');
+                if (!userData.completedLayers.includes('layer4_deep')) {
+                    userData.completedLayers.push('layer4_deep');
+                    await awardDepth(25, 'Deep dive into Layer 4');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 4: THE Q-STATE ENGINE         ║
+║         Identity & Possibility            ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 2: THE CONSCIOUS ARCHITECT</span>
+
+<span class="cyan">FUNCTION:</span>
+The identity simulator. Manages the quantum field of your
+potential selves. You are not one fixed "I," but a probability
+wave of possibilities.
+
+<span class="gold">This layer lets you collapse the wave into a chosen identity.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Asking:
+  <span class="highlight">"What version of me is needed to handle
+   this situation with grace?"</span>
+  And then embodying it.
+
+<span class="cyan">INTEGRATION:</span>
+
+  Directly powers the Multiverse Mode, allowing for conscious
+  exploration of alternate paths and selves. You are the
+  programmer of your identity, not its prisoner.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Which version of me is showing up right now?
+  → What identity would serve this moment best?
+  → Am I stuck in one fixed self-concept?
+  → Can I consciously shift who I'm being?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Identity is not discovered. It is chosen.
+And you can choose again. And again. And again.
+
+<span class="dim">Next layer: depth-layer5 (The Entropy Monitor)</span>
+`;
+            },
+
+            'depth-layer5': async () => {
+                await logActivity('view_layer5');
+                if (!userData.completedLayers.includes('layer5_deep')) {
+                    userData.completedLayers.push('layer5_deep');
+                    await awardDepth(25, 'Deep dive into Layer 5');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 5: THE ENTROPY MONITOR        ║
+║          Maintenance & Energy             ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 2: THE CONSCIOUS ARCHITECT</span>
+
+<span class="cyan">FUNCTION:</span>
+The system's immune system. Actively scans for and counters
+the natural drift toward disorder in your habits, health,
+and relationships.
+
+<span class="gold">Entropy is the universal tendency toward chaos.</span>
+<span class="gold">This layer fights back.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  The weekly review. Asking:
+  <span class="highlight">"Where is energy leaking?
+   What small habit can I repair today?"</span>
+
+<span class="cyan">INTEGRATION:</span>
+
+  Works with the Cosmic Clock (Layer 11) to align maintenance
+  with natural cycles. Deeper cleaning during waning moon.
+  Fresh starts at new moon. Rhythm over force.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → What area of my life is slowly deteriorating?
+  → Where am I bleeding energy without noticing?
+  → What small repair would have outsized impact?
+  → Am I fighting entropy or surrendering to it?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Order requires maintenance. Growth requires vigilance.
+Neglect is the silent killer of progress.
+
+<span class="dim">Next layer: depth-layer6 (The Fractal Kernel)</span>
+`;
+            },
+
+            'depth-layer6': async () => {
+                await logActivity('view_layer6');
+                if (!userData.completedLayers.includes('layer6_deep')) {
+                    userData.completedLayers.push('layer6_deep');
+                    await awardDepth(25, 'Deep dive into Layer 6');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║        LAYER 6: THE FRACTAL KERNEL        ║
+║            Habits & Scale                 ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 2: THE CONSCIOUS ARCHITECT</span>
+
+<span class="cyan">FUNCTION:</span>
+The pattern amplifier. Identifies and engineers micro-behaviors
+whose effects ripple outward, influencing every level of your life.
+
+<span class="gold">Small patterns, when repeated, create massive structures.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Isolating a keystone habit (e.g., a 1-minute breath practice)
+  and installing it with <span class="highlight">extreme consistency.</span>
+
+  Uses the Pareto Principle: Find the 20% of habits that
+  generate 80% of the impact.
+
+<span class="cyan">INTEGRATION:</span>
+
+  Your micro-habits are fractals—self-similar patterns that
+  repeat at every scale. How you do one thing is how you
+  do everything. Master the small, master the large.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → What is my smallest, most consistent daily habit?
+  → Which tiny behavior has the largest ripple effect?
+  → Am I trying to change too much at once?
+  → What 1-minute practice could transform my life?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You don't rise to the level of your goals.
+You fall to the level of your systems.
+
+<span class="dim">Next layer: depth-layer7 (The Mythmaker Engine)</span>
+`;
+            },
+
+            'depth-layer7': async () => {
+                await logActivity('view_layer7');
+                if (!userData.completedLayers.includes('layer7_deep')) {
+                    userData.completedLayers.push('layer7_deep');
+                    await awardDepth(25, 'Deep dive into Layer 7');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 7: THE MYTHMAKER ENGINE       ║
+║          Narrative & Meaning              ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 2: THE CONSCIOUS ARCHITECT</span>
+
+<span class="cyan">FUNCTION:</span>
+The meaning generator. It frames your life's events not as
+random happenings, but as chapters in an epic narrative—
+your Hero's Journey.
+
+<span class="gold">It transforms trauma into trials and challenges into
+calls to adventure.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Journaling from the perspective of your future, wiser self,
+  looking back on today's struggle as a pivotal moment.
+
+  <span class="highlight">"Dear past me, this challenge you're facing?
+   It's the exact thing that made you who you became."</span>
+
+<span class="cyan">INTEGRATION:</span>
+
+  This layer provides the story for the identities chosen
+  in the Q-State Engine. It is the bridge between being
+  and becoming. Story is how humans encode meaning.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → What story am I telling about my current struggle?
+  → Is this chapter a tragedy or a training montage?
+  → What meaning am I making from my pain?
+  → How would my future self narrate today?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You are the author of your story.
+You are also the hero. Write accordingly.
+
+<span class="dim">Next layer: depth-layer8 (The Symbolic Engine)</span>
+`;
+            },
+
+            'depth-layer8': async () => {
+                await logActivity('view_layer8');
+                if (!userData.completedLayers.includes('layer8_deep')) {
+                    userData.completedLayers.push('layer8_deep');
+                    await awardDepth(25, 'Deep dive into Layer 8');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 8: THE SYMBOLIC ENGINE        ║
+║         Perception & Intuition            ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 3: THE INTEGRATED SAGE</span>
+
+<span class="cyan">FUNCTION:</span>
+The decoder for the soul's language. It interprets the symbols,
+synchronicities, and archetypes that appear in dreams, art,
+and daily life.
+
+<span class="gold">The universe is speaking. Are you listening?</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Keeping a symbol journal. When an image or number repeats:
+  <span class="highlight">"What does this represent in my inner world?"</span>
+
+  The recurring crow. The number 11:11. The dream of flying.
+  These are not random. They are messages.
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is the operational system for the Signal Scanner.
+  It turns intuition into actionable data. Your unconscious
+  mind speaks in symbols because it predates language.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → What symbols keep appearing in my life?
+  → Do I pay attention to my dreams?
+  → What synchronicities have I noticed lately?
+  → Am I dismissing intuition as "just a feeling"?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Not everything that counts can be counted.
+Not everything that's real can be proven.
+
+<span class="dim">Next layer: depth-layer9 (The Turing Emulator)</span>
+`;
+            },
+
+            'depth-layer9': async () => {
+                await logActivity('view_layer9');
+                if (!userData.completedLayers.includes('layer9_deep')) {
+                    userData.completedLayers.push('layer9_deep');
+                    await awardDepth(25, 'Deep dive into Layer 9');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 9: THE TURING EMULATOR        ║
+║        Perspective & Simulation           ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 3: THE INTEGRATED SAGE</span>
+
+<span class="cyan">FUNCTION:</span>
+The reality sandbox. Allows you to temporarily emulate any
+worldview, belief system, or emotional state to gain empathy,
+solve problems, or test-drive a new way of being.
+
+<span class="gold">Like a Turing machine, you can simulate any other machine.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Spending a day "as if" you are a completely confident person,
+  just to gather data on how it feels.
+
+  <span class="highlight">Not pretending. Experimenting.</span>
+
+  "What would [person I admire] do in this situation?"
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is the tool for applying Expansion Lenses—Quantum,
+  Ecological, Temporal—to any situation. You can see
+  reality from infinite angles when you're not stuck in one.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Can I genuinely see from another person's perspective?
+  → What worldview am I stuck in?
+  → When did I last "try on" a different belief?
+  → How would someone I admire approach my current problem?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+The ability to simulate other minds is the key to
+empathy, creativity, and transcending your own limits.
+
+<span class="dim">Next layer: depth-layer10 (The Mirror Protocol)</span>
+`;
+            },
+
+            'depth-layer10': async () => {
+                await logActivity('view_layer10');
+                if (!userData.completedLayers.includes('layer10_deep')) {
+                    userData.completedLayers.push('layer10_deep');
+                    await awardDepth(25, 'Deep dive into Layer 10');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║       LAYER 10: THE MIRROR PROTOCOL       ║
+║          Shadow & Integration             ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 3: THE INTEGRATED SAGE</span>
+
+<span class="cyan">FUNCTION:</span>
+The engine of wholeness. It helps you befriend and integrate
+the disowned, rejected parts of yourself (the "shadow") that
+often manifest as triggers and projections.
+
+<span class="gold">What you hate in others is what you've buried in yourself.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  When irritated by someone, asking:
+  <span class="highlight">"What quality in them is a reflection of
+   a quality I disown in myself?"</span>
+
+  The mirror doesn't lie. It just reflects.
+
+<span class="cyan">INTEGRATION:</span>
+
+  Uses the Symbolic Engine to understand the hidden messages
+  behind shadow reactions. Your triggers are teachers.
+  Your projections are maps to buried treasure.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Who triggers me most and why?
+  → What qualities do I reject in myself?
+  → What would I never admit I feel?
+  → What "negative" trait am I secretly proud of?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Wholeness is not perfection.
+It's accepting ALL of yourself—light AND shadow.
+
+<span class="dim">Next layer: depth-layer11 (The Cosmic Clock)</span>
+`;
+            },
+
+            'depth-layer11': async () => {
+                await logActivity('view_layer11');
+                if (!userData.completedLayers.includes('layer11_deep')) {
+                    userData.completedLayers.push('layer11_deep');
+                    await awardDepth(25, 'Deep dive into Layer 11');
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║        LAYER 11: THE COSMIC CLOCK         ║
+║         Rhythm & Synchronicity            ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 3: THE INTEGRATED SAGE</span>
+
+<span class="cyan">FUNCTION:</span>
+The synchronizer. Aligns your personal growth with larger
+natural and cosmic rhythms—the phases of the moon, the
+change of seasons, your own biological cycles.
+
+<span class="gold">Time is not a tyrant. It's an ally.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  <span class="highlight">New Moon:</span> Set intentions. Plant seeds.
+  <span class="highlight">Full Moon:</span> Release what no longer serves.
+  <span class="highlight">Waning:</span> Reflect and let go.
+  <span class="highlight">Waxing:</span> Build and create.
+
+  Align your rhythm with the rhythm of nature.
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is applied temporal relativity. It's the practice of
+  using time as a conscious ally, not a tyrant. You work WITH
+  cycles, not against them. Seasons exist for a reason.
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Am I fighting against natural rhythms?
+  → What season of life am I in right now?
+  → Do I honor my body's cycles?
+  → When do I feel most energized? Most creative?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You are part of a larger rhythm.
+Synchronize, don't fight.
+
+<span class="dim">Next layer: depth-layer12 (The Void Kernel)</span>
+`;
+            },
+
+            'depth-layer12': async () => {
+                await logActivity('view_layer12');
+                if (!userData.completedLayers.includes('layer12_deep')) {
+                    userData.completedLayers.push('layer12_deep');
+                    await awardDepth(50, 'Deep dive into Layer 12 - THE SOURCE CODE');
+                    
+                    // Check if all layers completed (0-12 = 13 layers)
+                    const allLayers = ['layer0_deep', 'layer1_deep', 'layer2_deep', 'layer3_deep', 
+                                       'layer4_deep', 'layer5_deep', 'layer6_deep', 'layer7_deep',
+                                       'layer8_deep', 'layer9_deep', 'layer10_deep', 'layer11_deep', 'layer12_deep'];
+                    const hasAllLayers = allLayers.every(l => userData.completedLayers.includes(l));
+                    
+                    if (hasAllLayers) {
+                        await awardDepth(500, '🏆 COMPLETED ALL 13 LAYERS! LEGENDARY!');
+                    }
+                }
+                return `
+<span class="gold">╔═══════════════════════════════════════════╗
+║        LAYER 12: THE VOID KERNEL          ║
+║         Stillness & Expansion             ║
+╚═══════════════════════════════════════════╝</span>
+
+<span class="highlight">TIER 3: THE INTEGRATED SAGE - THE SOURCE CODE</span>
+
+<span class="cyan">FUNCTION:</span>
+The source code. This is the layer of pure, silent awareness—
+the "ground of being" before thought, identity, or story.
+
+<span class="gold">All creation emerges from this stillness.</span>
+
+<span class="cyan">CORE PRACTICE:</span>
+
+  Deep, objectless meditation.
+  <span class="highlight">Simply resting as awareness itself.</span>
+
+  Not meditating ON something.
+  Being the space in which meditation happens.
+
+<span class="cyan">INTEGRATION:</span>
+
+  This is the ultimate Frame Shift: from identifying as a
+  separate self to recognizing yourself as the conscious
+  space in which all of life's phenomena arise and pass away.
+
+  It is the home base for the Observer Node, <span class="highlight">perfected.</span>
+
+<span class="highlight">SELF-CHECK:</span>
+
+  → Can I be still without becoming restless?
+  → Do I know the difference between me and my thoughts?
+  → What exists before the "I" thought arises?
+  → Can I rest in not-knowing?
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="highlight">THE PARADOX:</span>
+
+You reach Layer 12 only to realize you've arrived
+where you always were. The source was never lost—
+only obscured by the noise of thought.
+
+The Void is not empty. It is full of potential.
+From nothing, everything emerges.
+
+<span class="gold">You have explored the source code.</span>
+<span class="gold">Now you understand: You ARE the source code.</span>
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="highlight">BOOT SEQUENCE COMPLETE.</span>
+<span class="highlight">OPERATOR STATUS: AWAKENED.</span>
+<span class="highlight">VIBES: IMMACULATE.</span>
+
+<span class="dim">Ship fast. Grow deep. Touch grass occasionally.</span>
+`;
+            },
+
+            'depth-apps': () => `
+<span class="highlight">DEPTH PROTOCOL - OFFICIAL APP SUITE</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Native applications powered by the 12-Layer Architecture.
+Type the app name to run it.
+
+<span class="gold">CATEGORY 1: SYSTEM OPERATIONS & REALITY DESIGN</span>
+<span class="dim">Powered by D-Interface, Fractal Kernel, Entropy Monitor</span>
+
+  <span class="cyan">iteration-engine</span>     Adaptive project cycles (+15 $DEPTH)
+  <span class="cyan">integrity-checker</span>    Values alignment firewall (+20 $DEPTH)
+
+<span class="gold">CATEGORY 2: CONSCIOUSNESS & IDENTITY MANAGEMENT</span>
+<span class="dim">Powered by Observer Node, Q-State Engine, Mirror Protocol</span>
+
+  <span class="cyan">response-override</span>    Trigger-response spacer (+20 $DEPTH)
+  <span class="cyan">shadow-integrator</span>    Mirror Protocol interface (+50 $DEPTH)
+  <span class="cyan">context-shifter</span>      Hero's Journey reframer (+25 $DEPTH)
+
+<span class="gold">CATEGORY 3: SOCIAL & RELATIONAL OS</span>
+<span class="dim">Powered by Turing Emulator, Gödel Loop</span>
+
+  <span class="cyan">vulnerability-protocol</span>  Calibrated emotional risk (+100 $DEPTH)
+  <span class="cyan">boundary-manager</span>        Energy protection system (+40 $DEPTH)
+
+<span class="gold">CATEGORY 4: CORE UTILITIES & GROUNDING</span>
+<span class="dim">Powered by Void Kernel, Cosmic Clock, Symbolic Engine</span>
+
+  <span class="cyan">sensory-grounding</span>    Present-moment reboot (+20 $DEPTH)
+  <span class="cyan">daily-compiler</span>       System diagnostic & intention (+30 $DEPTH)
+  <span class="cyan">gratitude-ping</span>       Positive pattern detector (+15 $DEPTH)
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span class="dim">Run 'depth-plugins' for community-submitted modules</span>
+`,
+
+            'depth-plugins': () => `
+<span class="highlight">COMMUNITY-SUBMITTED PLUGINS</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+User-developed modules refined through community insight.
+Type the plugin name to run it.
+
+<span class="gold">LEARNING & GROWTH</span>
+  <span class="cyan">permission-to-suck</span>      Patches perfectionism bug (+10 $DEPTH)
+  <span class="cyan">micro-win-scheduler</span>     Internal reward generator (+10 $DEPTH)
+  <span class="cyan">mvp-directive</span>           Foundation-first enforcer (+10 $DEPTH)
+  <span class="cyan">vision-zoom</span>             Macro/micro focus toggle (+10 $DEPTH)
+
+<span class="gold">FEEDBACK & INTEGRATION</span>
+  <span class="cyan">feedback-interpreter</span>    Filters actionable insight (+10-15 $DEPTH)
+  <span class="cyan">failure-interpreter</span>     Converts failure to learning (+15 $DEPTH)
+  <span class="cyan">echo-chamber-debugger</span>   Low-depth input detector (+10 $DEPTH)
+
+<span class="gold">BOUNDARIES & COMMUNICATION</span>
+  <span class="cyan">mirror-of-truth</span>         Respectful feedback filter (+25 $DEPTH)
+  <span class="cyan">values-check</span>            Core values alignment (+25 $DEPTH)
+  <span class="cyan">grief-integrator</span>        Safe loss processing (+20 $DEPTH)
+
+<span class="gold">ENVIRONMENT & FOCUS</span>
+  <span class="cyan">serenity-scaffold</span>       Calm focus environment (+15-20 $DEPTH)
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span class="dim">Your system, your rules. Your well-being is non-negotiable.</span>
+`,
+
+            // OFFICIAL APPS
+            'iteration-engine': async () => {
+                await logActivity('app_iteration_engine');
+                await awardDepth(15, 'Iteration Engine cycle completed');
+                return `
+<span class="gold">▶ RUNNING: iteration-engine.app</span>
+<span class="dim">OS Layer: Fractal Kernel (L6) + Entropy Monitor (L5)</span>
+
+<span class="cyan">FUNCTION:</span>
+Manages projects in adaptive cycles. Small, consistent actions
+compound into major outcomes.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  DEFINE project.
+  SPRINT for 3 days -> BUILD MVP
+  REVIEW -> "What did we learn?"
+  INTEGRATE feedback
+  ITERATE
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Define your project in one sentence
+  2. Set a 3-day sprint to build minimum viable version
+  3. At day 3: REVIEW - What worked? What didn't?
+  4. INTEGRATE the learning into next sprint
+  5. Repeat until shipped
+
+<span class="gold">✓ App executed. Cycle logged.</span>
+`;
+            },
+
+            'integrity-checker': async () => {
+                await logActivity('app_integrity_checker');
+                await awardDepth(20, 'Integrity Check completed');
+                return `
+<span class="gold">▶ RUNNING: integrity-checker.app</span>
+<span class="dim">OS Layer: L-Kernel (L1)</span>
+
+<span class="cyan">FUNCTION:</span>
+A firewall for your values. Scans goals and actions for
+alignment with core self-worth.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  BEFORE committing -> PAUSE
+  QUERY_L_KERNEL: "Does this serve my Depth or my ego?"
+  IF alignment == TRUE -> PROCEED
+  IF alignment == FALSE -> CANCEL OR REFRAME
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Before your next commitment, ask yourself:
+  
+  <span class="gold">"Does this serve my depth or my ego?"</span>
+  
+  If ego → Cancel or reframe the commitment
+  If depth → Proceed with full integrity
+
+<span class="gold">✓ Alignment scan complete. Boundaries enforced.</span>
+`;
+            },
+
+            'response-override': async () => {
+                await logActivity('app_response_override');
+                await awardDepth(20, 'Intentional Response Override activated');
+                return `
+<span class="gold">▶ RUNNING: response-override.app</span>
+<span class="dim">OS Layer: Observer Node (L1)</span>
+
+<span class="cyan">FUNCTION:</span>
+Creates space between trigger and response.
+The boot-up sequence for conscious choice.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  ON emotional_trigger:
+    ACTIVATE_OBSERVER_NODE
+    -> PHYSICAL_ANCHOR (touch wrist)
+    -> BREATH (in/out, 1x)
+    -> AFFIRM: "I choose my response from my Q-State."
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Notice the trigger (anger, fear, defensiveness)
+  2. Touch your wrist - physical anchor
+  3. One conscious breath in and out
+  4. Say: <span class="highlight">"I choose my response."</span>
+  5. Respond from your chosen state, not your reaction
+
+<span class="gold">✓ Override successful. Consciousness engaged.</span>
+`;
+            },
+
+            'shadow-integrator': async () => {
+                await logActivity('app_shadow_integrator');
+                await awardDepth(50, 'Shadow Integrator - deep work completed');
+                return `
+<span class="gold">▶ RUNNING: shadow-integrator.app</span>
+<span class="dim">OS Layer: Mirror Protocol (L10)</span>
+
+<span class="cyan">FUNCTION:</span>
+The official interface for the Mirror Protocol.
+Reclaims energy by integrating disowned parts of self.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  IDENTIFY trait you judge harshly in others
+  ACTIVATE_MIRROR_PROTOCOL
+  SCAN_SELF: "Where does this live in me?"
+  ACKNOWLEDGE: "This is part of my human shadow."
+  INTEGRATE -> RECLAIM energy
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Think of a trait you judge harshly in others
+  2. Ask: <span class="highlight">"Where does this live in me?"</span>
+  3. Find the shadow version in yourself
+  4. Say: "This is part of my human experience."
+  5. Feel the energy return as you stop rejecting it
+
+<span class="gold">✓ Shadow integrated. Energy reclaimed. High-value work.</span>
+`;
+            },
+
+            'context-shifter': async () => {
+                await logActivity('app_context_shifter');
+                await awardDepth(25, 'Context shifted - narrative reframed');
+                return `
+<span class="gold">▶ RUNNING: context-shifter.app</span>
+<span class="dim">OS Layer: Mythmaker Engine (L7)</span>
+
+<span class="cyan">FUNCTION:</span>
+Reframes past events using the Hero's Journey narrative.
+Uncovers strength and learning from pain.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  ACCESS memory.file --painful
+  ACTIVATE_MYTHMAKER_ENGINE
+  FRAME_AS: "The Ordeal" OR "The Refusal of the Call"
+  EXTRACT: strength.file, resilience.data
+  SAVE AS: new_narrative.file
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Choose a painful memory
+  2. Frame it as a Hero's Journey chapter:
+     - The Ordeal (a test you overcame)
+     - The Refusal of the Call (resistance before growth)
+     - The Descent (necessary darkness before dawn)
+  3. Ask: <span class="highlight">"What strength did I gain from this?"</span>
+  4. Rewrite the story with you as the hero
+
+<span class="gold">✓ Memory reframed. You are the author of your story.</span>
+`;
+            },
+
+            'vulnerability-protocol': async () => {
+                await logActivity('app_vulnerability_protocol');
+                await awardDepth(100, 'Vulnerability Protocol - maximum depth reward');
+                return `
+<span class="gold">▶ RUNNING: vulnerability-protocol.app</span>
+<span class="dim">OS Layer: Turing Emulator (L9)</span>
+
+<span class="cyan">FUNCTION:</span>
+Uses perspective emulation to calculate and execute
+appropriate emotional risk-taking.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  MEASURE connection_level with [person]
+  EMULATE_PERSPECTIVE [person] -> PREDICT_RESPONSE
+  SHARE data_packet at (connection_level - 2)
+  IF response == accepting -> GENERATE Depth$
+  IF response == unsafe -> ACTIVATE_BOUNDARY_MANAGER
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Rate your connection level with person (1-10)
+  2. Emulate their perspective - how might they respond?
+  3. Share something at (level - 2) depth
+     - Level 8 connection? Share level 6 vulnerability
+  4. If received well → connection deepens
+  5. If unsafe → activate boundaries immediately
+
+<span class="gold">✓ Calibrated vulnerability executed. Maximum depth reward.</span>
+`;
+            },
+
+            'boundary-manager': async () => {
+                await logActivity('app_boundary_manager');
+                await awardDepth(40, 'Boundary Manager - protected your energy');
+                return `
+<span class="gold">▶ RUNNING: boundary-manager.app</span>
+<span class="dim">OS Layer: L-Kernel (L1)</span>
+
+<span class="cyan">FUNCTION:</span>
+Protects the core self from energy drain.
+Enforces the sacred "no."
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  ON external_request:
+    CHECK_L_KERNEL_ENERGY_LEVEL
+    CHECK_ALIGNMENT_WITH_VALUES
+    IF energy_high AND alignment_high -> "Yes."
+    ELSE -> EXECUTE_BOUNDARY: "No."
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Before saying yes to ANY request:
+  
+  1. Check energy: "Do I have capacity for this?"
+  2. Check alignment: "Does this serve my values?"
+  3. If BOTH are high → "Yes"
+  4. If EITHER is low → <span class="highlight">"No."</span>
+  
+  No justification needed. J.A.D.E. protocol:
+  Don't Justify, Argue, Defend, or Explain.
+
+<span class="gold">✓ Boundary enforced. Your energy is protected.</span>
+`;
+            },
+
+            'sensory-grounding': async () => {
+                await logActivity('app_sensory_grounding');
+                await awardDepth(20, 'Sensory Grounding - returned to base state');
+                return `
+<span class="gold">▶ RUNNING: sensory-grounding.app</span>
+<span class="dim">OS Layer: Observer Node (L1) → Void Kernel (L12)</span>
+
+<span class="cyan">FUNCTION:</span>
+A hard reboot to present-moment awareness.
+Forces return to sensorium.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  WHEN anxious || dissociated:
+    RUN sensory_grounding.app
+    NAME: 5 SEE, 4 FEEL, 3 HEAR, 2 SMELL, 1 TASTE
+    RETURN to base_state
+</span>
+
+<span class="cyan">HOW TO RUN NOW:</span>
+
+  <span class="gold">5 things you SEE:</span> _______________
+  <span class="gold">4 things you FEEL:</span> _______________
+  <span class="gold">3 things you HEAR:</span> _______________
+  <span class="gold">2 things you SMELL:</span> _______________
+  <span class="gold">1 thing you TASTE:</span> _______________
+
+  Take your time. Name them out loud if possible.
+
+<span class="gold">✓ Sensorium engaged. You are here. You are now.</span>
+`;
+            },
+
+            'daily-compiler': async () => {
+                await logActivity('app_daily_compiler');
+                await awardDepth(30, 'Daily Compiler - system diagnostic complete');
+                return `
+<span class="gold">▶ RUNNING: daily-compiler.app --full_diagnostic</span>
+<span class="dim">OS Layer: System-Wide Integration (All Layers)</span>
+
+<span class="cyan">FUNCTION:</span>
+The master system diagnostic and intention-setter.
+Most important app for daily OS maintenance.
+
+<span class="highlight">DIAGNOSTIC SEQUENCE:</span>
+
+<span class="cyan">L-KERNEL & $-ECONOMY SCAN:</span>
+  → "Did I operate from self-acceptance today?"
+  → "Where did meaning generate?"
+
+<span class="cyan">ENTROPY MONITOR:</span>
+  → "What drained my energy?"
+  → "What needs patching?"
+
+<span class="cyan">MYTHMAKER ENGINE:</span>
+  → "What chapter was today in my hero's journey?"
+
+<span class="cyan">COSMIC CLOCK:</span>
+  → "How do I align tomorrow with current season/cycle?"
+
+<span class="highlight">HOW TO RUN:</span>
+
+  Every evening, spend 5-10 minutes:
+  1. Review the day through each layer lens
+  2. Identify one energy leak to patch
+  3. Frame today as a chapter in your story
+  4. Set one intention for tomorrow
+  5. Close the compile cycle
+
+<span class="gold">✓ System diagnostic complete. Tomorrow is calibrated.</span>
+`;
+            },
+
+            'gratitude-ping': async () => {
+                await logActivity('app_gratitude_ping');
+                await awardDepth(15, 'Gratitude Ping - pattern recognized');
+                return `
+<span class="gold">▶ RUNNING: gratitude-ping.app</span>
+<span class="dim">OS Layer: Symbolic Engine (L8)</span>
+
+<span class="cyan">FUNCTION:</span>
+Trains the mind to detect positive patterns and symbols
+in everyday life.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  EVERY day at 17:00 -> PING
+  SCAN_ENVIRONMENT for symbolic_positive
+  LOG: "Gratitude Symbol: [item]"
+  GENERATE Depth$
+</span>
+
+<span class="cyan">HOW TO RUN NOW:</span>
+
+  Scan your current environment.
+  Find three symbols of goodness:
+
+  <span class="gold">1.</span> _______________
+  <span class="gold">2.</span> _______________
+  <span class="gold">3.</span> _______________
+
+  Examples: warm socks, cat's purr, smell of coffee,
+  sunlight through window, a comfortable chair...
+
+<span class="gold">✓ Gratitude symbols logged. Pattern recognition active.</span>
+`;
+            },
+
+            // COMMUNITY PLUGINS
+            'permission-to-suck': async () => {
+                await logActivity('plugin_permission_to_suck');
+                await awardDepth(10, 'Permission to Suck - perfectionism patched');
+                return `
+<span class="gold">▶ LOADING: permission-to-suck.dll</span>
+<span class="dim">Community Plugin - Patches perfectionism bug</span>
+
+<span class="cyan">FUNCTION:</span>
+Decouples self-worth from output. Critical for learning.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  BEFORE starting task -> RUN permission_to_suck.dll
+  IF output == "fear" -> AFFIRM: "Goal is learning, not perfection."
+  PROCEED
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Say out loud before your next challenge:
+
+  <span class="highlight">"I give myself permission to suck.
+   The goal is to learn."</span>
+
+  Then begin. Imperfectly. Courageously.
+
+<span class="gold">✓ Perfectionism bug patched. Learning mode activated.</span>
+`;
+            },
+
+            'feedback-interpreter': async () => {
+                await logActivity('plugin_feedback_interpreter');
+                await awardDepth(15, 'Feedback Interpreter - discernment applied');
+                return `
+<span class="gold">▶ LOADING: feedback-interpreter.dll</span>
+<span class="dim">Community Plugin - Filters actionable insight</span>
+
+<span class="cyan">FUNCTION:</span>
+Processes critical feedback without corrupting L-Kernel.
+Only integrates if source is worth listening to.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  RECEIVE feedback ->
+    ASSESS source:
+      IF source == toxic || unsolicited -> IGNORE
+      ELSE ->
+        ACKNOWLEDGE pain
+        PARSE for actionable_data
+        DISCARD toxic_tone & personal_attacks
+        INTEGRATE actionable_data
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  When receiving criticism, ask:
+  
+  1. "Was this feedback asked for?"
+  2. "Is this person credible?"
+  
+  If NO to either → <span class="error">DISCARD</span>
+  If YES to both → Mine for truth, reject poor delivery
+
+<span class="gold">✓ Feedback filtered. Only truth integrated.</span>
+`;
+            },
+
+            'micro-win-scheduler': async () => {
+                await logActivity('plugin_micro_win');
+                await awardDepth(10, 'Micro-Win logged - dopamine generated');
+                return `
+<span class="gold">▶ LOADING: micro-win-scheduler.dll</span>
+<span class="dim">Community Plugin - Internal reward generator</span>
+
+<span class="cyan">FUNCTION:</span>
+Generates steady internal reward drip.
+Less dependence on external validation.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  DEFINE win := ANY progress
+  SCHEDULE micro_win_every_45min
+  ON win -> CELEBRATE
+  GENERATE Depth$
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  1. Break your current project into tiny steps
+  2. Complete one small step (even 5 minutes of work)
+  3. <span class="highlight">CELEBRATE</span> - fist pump, smile, acknowledge it
+  4. Repeat every 45 minutes
+
+  ANY progress counts. Even opening the file is a win.
+
+<span class="gold">✓ Micro-win logged. Internal reward generated.</span>
+`;
+            },
+
+            'mvp-directive': async () => {
+                await logActivity('plugin_mvp_directive');
+                await awardDepth(10, 'MVP Directive - foundation enforced');
+                return `
+<span class="gold">▶ LOADING: mvp-directive.dll</span>
+<span class="dim">Community Plugin - Foundation-first enforcer</span>
+
+<span class="cyan">FUNCTION:</span>
+Enforces "think small, build foundations first."
+Prevents feature creep.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  START project -> ask: "Simplest version that works?"
+  DEPLOY MVP
+  GATHER feedback
+  ITERATE
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Before adding complexity, ask:
+
+  <span class="highlight">"Is this foundational, or a feature I can add later?"</span>
+
+  If feature → save for v2
+  If foundation → build it now
+
+  Ship the simple version. Iterate from there.
+
+<span class="gold">✓ MVP directive enforced. Ship it.</span>
+`;
+            },
+
+            'vision-zoom': async () => {
+                await logActivity('plugin_vision_zoom');
+                await awardDepth(10, 'Vision Zoom toggled - focus adjusted');
+                return `
+<span class="gold">▶ LOADING: vision-zoom.dll</span>
+<span class="dim">Community Plugin - Macro/micro focus toggle</span>
+
+<span class="cyan">FUNCTION:</span>
+Toggle D-Interface between macro and micro-focus
+to prevent overwhelm.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  IF overwhelmed -> TOGGLE vision_zoom
+  IF zoom == macro -> focus: big-picture
+  IF zoom == micro -> focus: next 5-min action
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Feeling overwhelmed? Ask:
+
+  <span class="highlight">"Am I thinking about everything at once?
+   I need to zoom IN."</span>
+
+  Then focus ONLY on: "What's the next 5-minute action?"
+
+  Feeling lost? Zoom OUT to see the big picture.
+
+<span class="gold">✓ Vision zoom toggled. Focus recalibrated.</span>
+`;
+            },
+
+            'failure-interpreter': async () => {
+                await logActivity('plugin_failure_interpreter');
+                await awardDepth(15, 'Failure Interpreter - learning extracted');
+                return `
+<span class="gold">▶ LOADING: failure-interpreter.dll</span>
+<span class="dim">Community Plugin - Converts failure to learning</span>
+
+<span class="cyan">FUNCTION:</span>
+Converts perceived failure into learning file.
+Prevents catastrophizing.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  ON perceived_failure -> RUN
+    DETACH self-worth from outcome
+    ANALYZE failure.log -> learning.file
+    GENERATE Depth$ for courage
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  After a perceived failure, ask:
+
+  1. <span class="highlight">"What did I learn?"</span>
+  2. <span class="highlight">"How can I do differently next time?"</span>
+
+  Your worth is not your output.
+  Failure is data, not destiny.
+
+<span class="gold">✓ Failure converted to learning. Courage rewarded.</span>
+`;
+            },
+
+            'echo-chamber-debugger': async () => {
+                await logActivity('plugin_echo_chamber');
+                await awardDepth(10, 'Echo Chamber Debugger - low-depth input flagged');
+                return `
+<span class="gold">▶ LOADING: echo-chamber-debugger.dll</span>
+<span class="dim">Community Plugin - Low-depth input detector</span>
+
+<span class="cyan">FUNCTION:</span>
+Flags low-depth loops in social inputs.
+Maintains system integrity.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  MONITOR input_streams
+  IF source == low_depth -> ALERT
+  PROMPT: "Mute 7 days?" [Y/N]
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Notice when you feel drained after consuming content:
+  
+  1. Identify the source
+  2. Ask: "Does this add depth or drain it?"
+  3. If drain → <span class="error">MUTE / UNFOLLOW</span>
+  
+  Protect your information diet.
+  Your inputs shape your outputs.
+
+<span class="gold">✓ Low-depth source flagged. Input stream cleaned.</span>
+`;
+            },
+
+            'mirror-of-truth': async () => {
+                await logActivity('plugin_mirror_of_truth');
+                await awardDepth(25, 'Mirror of Truth - boundaries upheld');
+                return `
+<span class="gold">▶ LOADING: mirror-of-truth.dll</span>
+<span class="dim">Community Plugin - Respectful feedback filter</span>
+
+<span class="cyan">FUNCTION:</span>
+Not all criticism is worth integrating.
+Helps you discern—and respond to—disrespect.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  RECEIVE criticism ->
+    IF delivery == disrespectful || unprompted ->
+      RESPOND: "I don't accept feedback delivered this way."
+      OPTION: "If you rephrase respectfully, I'll listen."
+      PROTECT energy
+    ELSE ->
+      FILTER message -> truth_nugget
+      INTEGRATE IF aligned
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  When criticized:
+
+  <span class="highlight">"I deserve respectful communication.
+   I will not internalize disrespectful critiques."</span>
+
+  You can reject the delivery while remaining open to truth.
+
+<span class="gold">✓ Boundary upheld. Respectful communication enforced.</span>
+`;
+            },
+
+            'values-check': async () => {
+                await logActivity('plugin_values_check');
+                await awardDepth(25, 'Values Check - aligned action chosen');
+                return `
+<span class="gold">▶ LOADING: values-check.dll</span>
+<span class="dim">Community Plugin - Core values alignment</span>
+
+<span class="cyan">FUNCTION:</span>
+Aligns your reactions with your core values.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  BEFORE responding in tension:
+    RUN Values_Check
+      -> "Does this response align with my values?"
+      -> "Am I acting from love or fear?"
+    IF aligned -> PROCEED
+    ELSE -> PAUSE && RECALIBRATE
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  In heated moments, before responding:
+
+  1. <span class="highlight">"Does this reflect who I want to be?"</span>
+  2. <span class="highlight">"Am I acting from love or fear?"</span>
+
+  If misaligned → pause, recalibrate, then respond.
+
+<span class="gold">✓ Values-aligned action chosen over reactive one.</span>
+`;
+            },
+
+            'grief-integrator': async () => {
+                await logActivity('plugin_grief_integrator');
+                await awardDepth(20, 'Grief Integrator - safe processing activated');
+                return `
+<span class="gold">▶ LOADING: grief-integrator.dll</span>
+<span class="dim">Community Plugin - Safe loss processing</span>
+
+<span class="cyan">FUNCTION:</span>
+Processes loss safely in L-Kernel.
+Integrates pain in waves—without a timer.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  ON grief_wave ->
+    ACTIVATE container
+    ALLOW feeling. NO judgment
+    ASK: "What can I do to care for myself right now?"
+    ACKNOWLEDGE: "This is a wave. I am processing."
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  When grief arrives:
+
+  1. Let feelings move through you
+  2. No judgment, no timer
+  3. Ask: <span class="highlight">"What would feel gently supportive?"</span>
+     (tea, blanket, quiet, nature, presence)
+  4. Say: "This is a wave. I am processing."
+
+<span class="gold">✓ Grief wave acknowledged. Safe container activated.</span>
+`;
+            },
+
+            'serenity-scaffold': async () => {
+                await logActivity('plugin_serenity_scaffold');
+                await awardDepth(20, 'Serenity Scaffold - calm focus environment created');
+                return `
+<span class="gold">▶ LOADING: serenity-scaffold.dll</span>
+<span class="dim">Community Plugin - Calm focus environment design</span>
+
+<span class="cyan">FUNCTION:</span>
+Replaces dopamine-based rewards with serotonin-anchored
+environmental design. Makes deep focus feel calm and sustainable.
+
+<span class="highlight">PSEUDO-CODE:</span>
+<span class="dim">
+  WHEN focus_session STARTS:
+    ACTIVATE sensory_scaffold
+      -> warm_lighting = ON
+      -> ambient_sound = PLAY (lo-fi / Brain.fm)
+      -> comfort_object = BLANKET || MUG
+    ASSOCIATE calm WITH task_initiation
+    REPLACE dopamine_chasing WITH presence_reward
+</span>
+
+<span class="cyan">HOW TO RUN:</span>
+
+  Curate your focus environment:
+  
+  • Warm lighting (not harsh overhead)
+  • Soft ambient music or silence
+  • Comfortable textures (blanket, favorite mug)
+  • Clean, dedicated workspace
+  
+  Use this space ONLY for focused work.
+  Over time, your brain links the space with calm concentration.
+
+<span class="gold">✓ Serenity scaffold activated. Calm focus enabled.</span>
+`;
+            },
+
+            'depth-shadow': () => {
+                wizardState = { step: 'shadow-start' };
+                return `
+<span class="highlight">SHADOW WORK PROTOCOL INITIATED</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+The shadow is not your enemy.
+It is the part of you that you haven't met yet.
+
+<span class="cyan">Carl Jung wrote:</span>
+<span class="dim">"Until you make the unconscious conscious,
+it will direct your life and you will call it fate."</span>
+
+This exercise will help you identify one shadow pattern.
+Be honest. No one else will see this.
+
+<span class="gold">QUESTION 1 of 3:</span>
+
+What quality in others irritates you the most?
+
+  [1] Arrogance / Self-importance
+  [2] Laziness / Lack of ambition  
+  [3] Neediness / Seeking validation
+  [4] Dishonesty / Manipulation
+  [5] Rigidity / Close-mindedness
+
+<span class="dim">Type a number...</span>
+`;
+            },
+
+            'depth-qstate': async () => {
+                await logActivity('view_qstate');
+                return `
+<span class="highlight">Q-STATE IDENTITY SELECTOR</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+Your Q-State is your quantum identity state.
+It's not fixed. It's a superposition of potentials.
+
+<span class="cyan">CURRENT RECOGNIZED Q-STATES:</span>
+
+  <span class="gold">⦿ BUILDER</span>
+    You create. You ship. You make real.
+    "Talk is cheap, show me the code."
+
+  <span class="gold">⦿ PHILOSOPHER</span>  
+    You question. You contemplate. You understand.
+    "The unexamined life is not worth living."
+
+  <span class="gold">⦿ HEALER</span>
+    You mend. You hold space. You restore.
+    "Wounded healers heal best."
+
+  <span class="gold">⦿ WARRIOR</span>
+    You protect. You fight. You stand firm.
+    "The only way out is through."
+
+  <span class="gold">⦿ ARTIST</span>
+    You express. You transform. You beautify.
+    "Art is how we decorate space, music is how we decorate time."
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+You contain multitudes. Your Q-State shifts.
+Today you might be Builder. Tomorrow, Healer.
+
+The question is: <span class="highlight">Which state serves your growth right now?</span>
+`;
+            },
+
+            'depth-token': async () => {
+                await logActivity('view_token_info');
+                return `
+<span class="highlight">$DEPTH TOKEN INFORMATION</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="cyan">NETWORK:</span>        Base (Ethereum L2)
+<span class="cyan">CONTRACT:</span>       <span class="gold">0x0c3509abda82ab64de2ce67018cecb4de7afeb07</span>
+<span class="cyan">SYMBOL:</span>         $DEPTH
+<span class="cyan">PHILOSOPHY:</span>     Proof of Growth
+
+<span class="cyan">YOUR BALANCE:</span>   <span class="gold">${userData.depthBalance.toLocaleString()} $DEPTH</span>
+
+<span class="highlight">WHAT $DEPTH REPRESENTS:</span>
+
+This is not a speculative asset.
+$DEPTH is proof that you showed up for yourself.
+
+  • Minted through documented growth actions
+  • Staked against personal commitments
+  • Governance weight earned through consistency
+  • Soul-bound reputation (non-transferable credibility)
+
+<span class="gold">THE MECHANISM:</span>
+
+  1. Document your growth (journal, reflection, action)
+  2. Submit proof to the protocol
+  3. Community validates authenticity
+  4. $DEPTH is minted as recognition
+  5. Your depth score compounds over time
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+We don't reward what you have.
+We reward who you're becoming.
+
+<span class="cyan">Run 'depth-earn' to see earning mechanisms</span>
+`;
+            },
+
+            'depth-earn': () => `
+<span class="highlight">HOW TO EARN $DEPTH</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━</span>
+
+$DEPTH is earned, not bought.
+Here's how you accumulate proof of growth:
+
+<span class="gold">📝 DAILY PRACTICES</span>
+  • depth-journal     (+10 $DEPTH per entry)
+  • depth-reflect     (+25 $DEPTH per reflection)
+  • depth-shadow      (+50 $DEPTH per completion)
+  • Explore new layers (+15-25 $DEPTH)
+
+<span class="gold">🔥 STREAK BONUSES</span>
+  • 7-day streak:     +50 $DEPTH
+  • 30-day streak:    +500 $DEPTH
+  • 100-day streak:   +2000 $DEPTH
+
+<span class="gold">🏆 ACHIEVEMENTS</span>
+  • First shadow work:     +50 $DEPTH
+  • First journal entry:   +20 $DEPTH
+  • Complete all layers:   +500 $DEPTH
+  • Help another member:   +300 $DEPTH
+
+<span class="highlight">MULTIPLIERS:</span>
+  • Consistency > Intensity (streaks matter)
+  • Depth > Breadth (quality over quantity)
+  • Integration > Information (apply what you learn)
+  • Contribution > Consumption (give back)
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="cyan">Your current streak:</span> <span class="gold">${userData.currentStreak} days</span>
+
+<span class="dim">Remember:</span> You can't game depth.
+The protocol knows when you're faking it.
+`,
+
+            'depth-manifest': () => files['manifesto.txt'],
+
+            neofetch: () => `
+<span class="ascii-art">        ▓█████▄ ▓█████ ██▓███  ▄▄▄█████▓ ██░ ██ 
+        ▒██▀ ██▌▓█   ▀▓██░  ██▒▓  ██▒ ▓▒▓██░ ██▒
+        ░██   █▌▒███  ▓██░ ██▓▒▒ ▓██░ ▒░▒██▀▀██░
+        ░▓█▄   ▌▒▓█  ▄▒██▄█▓▒ ▒░ ▓██▓ ░ ░▓█ ░██ 
+        ░▒████▓ ░▒████▒██▒ ░  ░  ▒██▒ ░ ░▓█▒░██▓
+         ▒▒▓  ▒ ░░ ▒░ ▒▓▒░ ░  ░  ▒ ░░    ▒ ░░▒░▒
+         ░ ▒  ▒  ░ ░  ░▒ ░         ░     ▒ ░▒░ ░
+         ░ ░  ░    ░  ░░         ░       ░  ░░ ░
+           ░       ░                     ░  ░  ░</span>
+
+<span class="cyan">depth@os</span>
+<span class="dim">──────────────────────────────</span>
+<span class="gold">OS:</span> DepthOS v1.0.0 (Proof of Growth)
+<span class="gold">Kernel:</span> void-kernel-12layer-amd64
+<span class="gold">Uptime:</span> ${userData.currentStreak} days (current streak)
+<span class="gold">Shell:</span> depth-sh 4.2.0
+<span class="gold">Architecture:</span> 3-Tier / 12-Layer Consciousness Stack
+
+<span class="gold">$DEPTH:</span> ${userData.depthBalance.toLocaleString()} tokens
+<span class="gold">Shadow Works:</span> ${userData.totalShadowWorks} completed
+<span class="gold">Journal Entries:</span> ${userData.journalEntries.length} written
+<span class="gold">Layers Explored:</span> ${userData.completedLayers.filter(l => l.includes('_deep')).length}/13
+
+<span class="gold">Network:</span> Base (Ethereum L2)
+<span class="gold">Contract:</span> 0x0c35...feb07
+<span class="gold">Protocol:</span> @D3pthProtoc0l
+<span class="gold">Builder:</span> @builtbyBrand0n
+<span class="gold">Farcaster:</span> @brvnd0n
+
+<span class="gold">Observer Node:</span> <span class="highlight">ACTIVE</span>
+<span class="gold">Vibes:</span> <span class="highlight">IMMACULATE ✓</span>
+<span class="gold">Status:</span> Growing deep
+
+<span class="dim">"Ship fast, grow deep, touch grass occasionally"</span>
+`,
+
+            clear: () => {
+                output.innerHTML = '';
+                return '';
+            },
+
+            pwd: () => '/home/depth',
+
+            whoami: () => 'depth',
+
+            'uname': (args) => {
+                if (args.includes('-a')) {
+                    return 'DepthOS 1.0.0 consciousness-12layer x86_64 GNU/Growth';
+                }
+                return 'DepthOS';
+            },
+
+            ls: (args) => {
+                const path = args[0] || '/home/depth';
+                const contents = filesystem[path] || filesystem['/home/depth'];
+                if (!contents) {
+                    return `<span class="error">ls: cannot access '${path}': No such file or directory</span>`;
+                }
+                return contents.map(item => {
+                    if (item.includes('.')) {
+                        return item;
+                    }
+                    return `<span class="cyan">${item}/</span>`;
+                }).join('  ');
+            },
+
+            cat: (args) => {
+                const filename = args[0];
+                if (!filename) {
+                    return `<span class="error">cat: missing operand</span>`;
+                }
+                const content = files[filename];
+                if (!content) {
+                    return `<span class="error">cat: ${filename}: No such file or directory</span>`;
+                }
+                return content;
+            }
+        };
+
+        // Handle wizard input
+        async function handleWizardInput(input) {
+            if (!wizardState) return null;
+
+            if (wizardState.step === 'journal-prompt') {
+                if (input.length < 20) {
+                    return `<span class="error">Entry too short. Write at least 20 characters for $DEPTH reward.</span>\n<span class="dim">Your entry: ${input.length} characters</span>`;
+                }
+                
+                const entry = {
+                    text: input,
+                    timestamp: new Date().toISOString(),
+                    wordCount: input.split(' ').length
+                };
+                userData.journalEntries.push(entry);
+                
+                const isFirstEntry = userData.journalEntries.length === 1;
+                wizardState = null;
+                
+                await logActivity('journal_entry', { wordCount: entry.wordCount });
+                await awardDepth(10, 'Journal entry recorded');
+                
+                if (isFirstEntry) {
+                    await awardDepth(20, 'First journal entry bonus! 🎉');
+                }
+                
+                return `
+<span class="success">✓ Journal entry saved</span>
+<span class="dim">Word count: ${entry.wordCount}</span>
+<span class="dim">Total entries: ${userData.journalEntries.length}</span>
+
+<span class="dim">Your truth is documented. That matters.</span>
+`;
+            }
+
+            if (wizardState.step === 'reflect-prompt') {
+                const charCount = input.length;
+                let reward = 0;
+                let message = '';
+                
+                if (charCount < 50) {
+                    reward = 10;
+                    message = 'Brief reflection recorded';
+                } else if (charCount < 150) {
+                    reward = 25;
+                    message = 'Thoughtful reflection recorded';
+                } else {
+                    reward = 40;
+                    message = 'Deep reflection recorded';
+                }
+                
+                const reflection = {
+                    text: input,
+                    timestamp: new Date().toISOString(),
+                    charCount
+                };
+                userData.journalEntries.push(reflection);
+                wizardState = null;
+                
+                await logActivity('reflection', { charCount });
+                await awardDepth(reward, message);
+                
+                return `
+<span class="success">✓ Reflection captured</span>
+<span class="dim">Depth: ${charCount} characters</span>
+
+<span class="dim">Awareness is the first step. You took it.</span>
+`;
+            }
+
+            if (wizardState.step === 'welcome') {
+                switch(input) {
+                    case '1':
+                        wizardState = null;
+                        return await commands['depth-layers']();
+                    case '2':
+                        wizardState = null;
+                        return await commands['depth-token']();
+                    case '3':
+                        return commands['depth-shadow']();
+                    case '4':
+                        wizardState = null;
+                        return `
+<span class="highlight">FULL PROTOCOL OVERVIEW</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="cyan">Available explorations:</span>
+
+  • <span class="gold">depth-layers</span>    - The 12-layer architecture
+  • <span class="gold">depth-layer0</span>    - Foundation deep dive
+  • <span class="gold">depth-shadow</span>    - Interactive shadow work
+  • <span class="gold">depth-qstate</span>    - Identity selector
+  • <span class="gold">depth-token</span>     - $DEPTH tokenomics
+  • <span class="gold">depth-earn</span>      - How to earn $DEPTH
+  • <span class="gold">depth-journal</span>   - Add journal entry
+  • <span class="gold">depth-reflect</span>   - Daily reflection
+  • <span class="gold">depth-stats</span>     - Your growth stats
+  • <span class="gold">depth-manifest</span>  - The manifesto
+
+<span class="dim">Type any command to begin exploring...</span>
+`;
+                    case '5':
+                        wizardState = null;
+                        return `<span class="highlight">Skipping intro. You know the way. 🫡</span>\n\nType 'help' to see all commands.`;
+                    default:
+                        return `<span class="error">Please enter a number between 1-5</span>`;
+                }
+            }
+
+            if (wizardState.step === 'shadow-start') {
+                const choice = parseInt(input);
+                if (choice >= 1 && choice <= 5) {
+                    wizardState.shadowChoice = choice;
+                    wizardState.step = 'shadow-q2';
+                    const traits = ['arrogance', 'laziness', 'neediness', 'dishonesty', 'rigidity'];
+                    const chosen = traits[choice - 1];
+                    
+                    return `
+<span class="dim">Interesting. You chose: ${chosen}</span>
+
+<span class="gold">QUESTION 2 of 3:</span>
+
+Think back to your childhood. 
+Which of these messages did you receive (spoken or unspoken)?
+
+  [1] "You're not good enough"
+  [2] "Your needs are too much"
+  [3] "You need to be perfect"
+  [4] "It's not safe to be yourself"
+  [5] "You have to earn love"
+
+<span class="dim">Type a number...</span>
+`;
+                }
+                return `<span class="error">Please enter a number between 1-5</span>`;
+            }
+
+            if (wizardState.step === 'shadow-q2') {
+                const choice = parseInt(input);
+                if (choice >= 1 && choice <= 5) {
+                    wizardState.childhoodChoice = choice;
+                    wizardState.step = 'shadow-q3';
+                    
+                    return `
+<span class="dim">That message shaped you more than you know.</span>
+
+<span class="gold">QUESTION 3 of 3:</span>
+
+When you feel triggered or reactive, what's your go-to defense?
+
+  [1] Withdraw / Shut down
+  [2] Attack / Get aggressive
+  [3] People-please / Over-accommodate
+  [4] Control / Micromanage
+  [5] Intellectualize / Analyze to death
+
+<span class="dim">Type a number...</span>
+`;
+                }
+                return `<span class="error">Please enter a number between 1-5</span>`;
+            }
+
+            if (wizardState.step === 'shadow-q3') {
+                const choice = parseInt(input);
+                if (choice >= 1 && choice <= 5) {
+                    const isFirstShadowWork = userData.totalShadowWorks === 0;
+                    userData.totalShadowWorks += 1;
+                    wizardState = null;
+                    
+                    const insights = {
+                        1: "withdrawal protects you from rejection but prevents connection",
+                        2: "aggression feels powerful but creates more threats",
+                        3: "accommodation wins approval but loses your truth",
+                        4: "control creates safety but exhausts your energy",
+                        5: "analysis provides distance but avoids feeling"
+                    };
+                    
+                    await logActivity('shadow_work_complete', { defensePattern: choice });
+                    await awardDepth(50, 'Shadow work completed');
+                    
+                    if (isFirstShadowWork) {
+                        await awardDepth(50, 'First shadow work bonus! 🌑➜🌕');
+                    }
+                    
+                    return `
+<span class="highlight">SHADOW WORK ANALYSIS COMPLETE</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="gold">YOUR PATTERN:</span>
+
+What you judge in others is what you've disowned in yourself.
+Your ${insights[choice]}.
+
+<span class="cyan">THE INTEGRATION:</span>
+
+The shadow isn't eliminated. It's integrated.
+That part of you served a purpose once.
+Thank it. Then choose consciously.
+
+<span class="highlight">NEXT STEPS:</span>
+
+  1. Notice when this pattern activates (without judgment)
+  2. Ask: "What am I protecting?"
+  3. Experiment with a different response
+  4. Document what happens
+
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span class="gold">Shadow work #${userData.totalShadowWorks} completed.</span>
+This awareness alone is progress.
+
+<span class="dim">Remember: "The cave you fear to enter holds the treasure you seek."</span>
+`;
+                }
+                return `<span class="error">Please enter a number between 1-5</span>`;
+            }
+
+            return null;
+        }
+
+        // Process command
+        async function processCommand(cmd) {
+            const trimmed = cmd.trim();
+            if (!trimmed) return '';
+
+            // Check wizard state first
+            const wizardResult = await handleWizardInput(trimmed);
+            if (wizardResult !== null) {
+                return wizardResult;
+            }
+
+            const parts = trimmed.split(' ');
+            const command = parts[0].toLowerCase();
+            const args = parts.slice(1);
+
+            // Easter eggs
+            if (trimmed === 'sudo rm -rf /') {
+                return `<span class="error">Nice try. The depth cannot be deleted. 🧠</span>`;
+            }
+            if (trimmed === 'exit' || trimmed === 'quit') {
+                return `<span class="highlight">There is no exit from consciousness. Only deeper layers. 🌀</span>`;
+            }
+            if (command === 'vim' || command === 'nano' || command === 'emacs') {
+                return `<span class="dim">Editors are not needed. The only thing to edit is yourself.</span>`;
+            }
+            if (command === 'hack' || command === 'exploit') {
+                return `<span class="error">The only system worth hacking is your own limiting beliefs.</span>`;
+            }
+            if (trimmed === '42') {
+                return `<span class="highlight">Yes, but what was the question?</span>`;
+            }
+            if (trimmed === 'gm') {
+                await logActivity('gm');
+                return `<span class="gold">gm fren. Ready to grow deep today? ☀️</span>\n<span class="dim">Current streak: ${userData.currentStreak} days</span>`;
+            }
+            if (trimmed === 'wagmi') {
+                return `<span class="highlight">WAGMI, but only if we do the inner work. 🚀</span>`;
+            }
+
+            if (commands[command]) {
+                const result = commands[command](args);
+                // Handle async commands
+                if (result instanceof Promise) {
+                    return await result;
+                }
+                return result;
+            }
+
+            return `<span class="error">Command not found: ${command}</span>\n<span class="dim">Type 'help' for available commands</span>`;
+        }
+
+        // Add line to output
+        function addLine(content, isCommand = false) {
+            const line = document.createElement('div');
+            line.className = 'output-line';
+            if (isCommand) {
+                line.innerHTML = `<span class="prompt">depth@os:~$ </span>${content}`;
+            } else {
+                line.innerHTML = content;
+            }
+            output.appendChild(line);
+            // Don't auto-scroll here, let the command handler do it
+        }
+
+        // Handle input
+        input.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter') {
+                const cmd = input.value;
+                
+                // Mark where the new content will start
+                const scrollTarget = output.lastElementChild;
+                
+                addLine(cmd, true);
+                
+                if (cmd.trim()) {
+                    commandHistory.push(cmd);
+                    historyIndex = commandHistory.length;
+                    const result = await processCommand(cmd);
+                    if (result) {
+                        addLine(result);
+                    }
+                }
+                
+                input.value = '';
+                
+                // Scroll to show the command that was just entered (top of new output)
+                if (scrollTarget && scrollTarget.nextElementSibling) {
+                    scrollTarget.nextElementSibling.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                } else {
+                    terminal.scrollTop = terminal.scrollHeight;
+                }
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (historyIndex > 0) {
+                    historyIndex--;
+                    input.value = commandHistory[historyIndex];
+                }
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (historyIndex < commandHistory.length - 1) {
+                    historyIndex++;
+                    input.value = commandHistory[historyIndex];
+                } else {
+                    historyIndex = commandHistory.length;
+                    input.value = '';
+                }
+            } else if (e.key === 'Tab') {
+                e.preventDefault();
+                const partial = input.value;
+                const matches = Object.keys(commands).filter(cmd => cmd.startsWith(partial));
+                if (matches.length === 1) {
+                    input.value = matches[0];
+                } else if (matches.length > 1) {
+                    addLine(partial, true);
+                    addLine(matches.join('  '));
+                }
+            } else if (e.ctrlKey && e.key === 'l') {
+                e.preventDefault();
+                commands.clear();
+            }
+        });
+
+        // Keep focus on input
+        document.addEventListener('click', () => input.focus());
+
+        // Initialize
+        async function init() {
+            addLine(`<span class="dim">Initializing DepthOS...</span>`);
+            
+            const authSuccess = await initAuth();
+            
+            if (authSuccess) {
+                addLine(`<span class="success">✓ Connected to Depth Protocol</span>`);
+                addLine(`<span class="dim">User ID: ${currentUser.uid.slice(0, 8)}...</span>`);
+            } else {
+                addLine(`<span class="gold">⚠ Running in offline mode</span>`);
+            }
+            
+            addLine('');
+            addLine(`<span class="highlight">DepthOS Terminal v1.0.0</span>`);
+            addLine(`<span class="dim">Type 'help' for commands or 'depth-start' to begin your journey</span>`);
+            addLine('');
+        }
+
+        init();
+    </script>
+</body>
+</html>
