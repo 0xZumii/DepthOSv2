@@ -127,6 +127,12 @@
             justify-content: space-between;
             border-bottom: 1px solid #333;
             z-index: 100;
+            opacity: 0;
+            transition: opacity 0.5s ease-in;
+        }
+
+        .status-bar.visible {
+            opacity: 1;
         }
 
         .status-item {
@@ -139,6 +145,66 @@
 
         #terminal {
             padding-top: 50px;
+            opacity: 0;
+            transition: opacity 0.5s ease-in;
+        }
+
+        #terminal.visible {
+            opacity: 1;
+        }
+
+        #boot-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #0a0a0a;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 1s ease-out;
+        }
+
+        #boot-overlay.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #boot-text {
+            font-family: 'Courier New', monospace;
+            color: #00ff88;
+            font-size: 16px;
+            line-height: 1.8;
+            max-width: 600px;
+            padding: 20px;
+        }
+
+        .boot-line {
+            opacity: 0;
+            animation: bootFadeIn 0.3s ease-out forwards;
+        }
+
+        .boot-success {
+            color: #00ff88;
+        }
+
+        .boot-warning {
+            color: #ffaa00;
+        }
+
+        .boot-highlight {
+            color: #ff88ff;
+        }
+
+        .boot-cyan {
+            color: #00ffff;
+        }
+
+        @keyframes bootFadeIn {
+            from { opacity: 0; transform: translateY(-5px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
 </head>
@@ -155,13 +221,70 @@
         </div>
     </div>
 
+    <!-- Boot Sequence Overlay -->
+    <div id="boot-overlay">
+        <div id="boot-text"></div>
+    </div>
+
     <div id="terminal">
         <div id="output"></div>
         <div class="input-line">
             <span class="prompt">depth@os:~$ </span>
-            <input type="text" id="input" autofocus autocomplete="off" spellcheck="false">
+            <input type="text" id="input" autocomplete="off" spellcheck="false">
         </div>
     </div>
+
+    <script>
+        // Boot Sequence
+        const bootSequence = [
+            { text: 'INITIALIZING DEPTHOS v1.0...', delay: 0 },
+            { text: 'LOADING PROOF OF GROWTH PROTOCOLS...', delay: 800 },
+            { text: 'MOUNTING /dev/depth...', delay: 1800 },
+            { text: 'ACTIVATING LAYER 0: SAFETY & STABILITY...', delay: 3000, class: 'boot-warning' },
+            { text: 'INITIALIZING 12-LAYER ARCHITECTURE...', delay: 4500 },
+            { text: 'BOOTING OBSERVER NODE...', delay: 6000 },
+            { text: 'LOADING FRACTAL KERNEL...', delay: 7200 },
+            { text: 'CONNECTING TO BASE NETWORK...', delay: 8500, class: 'boot-cyan' },
+            { text: 'CONTRACT: 0x0c3509abda82ab64de2ce67018cecb4de7afeb07', delay: 10000, class: 'boot-cyan' },
+            { text: 'CHECKING VIBES...', delay: 11500, class: 'boot-highlight' },
+            { text: 'VIBES: IMMACULATE ✓', delay: 13000, class: 'boot-highlight' },
+            { text: '', delay: 14000 },
+            { text: 'SYSTEM STATUS: DEPTH ACHIEVED. READY.', delay: 15000, class: 'boot-success' },
+        ];
+
+        async function runBootSequence() {
+            const bootText = document.getElementById('boot-text');
+            const bootOverlay = document.getElementById('boot-overlay');
+            
+            for (let i = 0; i < bootSequence.length; i++) {
+                const line = bootSequence[i];
+                const delay = i === 0 ? 500 : line.delay - bootSequence[i-1].delay;
+                await new Promise(resolve => setTimeout(resolve, delay));
+                const div = document.createElement('div');
+                div.className = `boot-line ${line.class || ''}`;
+                div.textContent = line.text;
+                bootText.appendChild(div);
+            }
+            
+            // Wait a moment after last line, then fade out
+            await new Promise(resolve => setTimeout(resolve, 2500));
+            bootOverlay.classList.add('fade-out');
+            
+            // Show status bar and terminal
+            document.querySelector('.status-bar').classList.add('visible');
+            document.getElementById('terminal').classList.add('visible');
+            
+            // Remove overlay after fade
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            bootOverlay.style.display = 'none';
+            
+            // Focus input
+            document.getElementById('input').focus();
+        }
+
+        // Start boot sequence immediately
+        runBootSequence();
+    </script>
 
     <!-- Firebase SDKs -->
     <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
@@ -2681,19 +2804,16 @@ This awareness alone is progress.
 
         // Initialize
         async function init() {
-            addLine(`<span class="dim">Initializing DepthOS...</span>`);
-            
             const authSuccess = await initAuth();
             
             if (authSuccess) {
                 addLine(`<span class="success">✓ Connected to Depth Protocol</span>`);
-                addLine(`<span class="dim">User ID: ${currentUser.uid.slice(0, 8)}...</span>`);
             } else {
                 addLine(`<span class="gold">⚠ Running in offline mode</span>`);
             }
             
             addLine('');
-            addLine(`<span class="highlight">DepthOS Terminal v1.0.0</span>`);
+            addLine(`<span class="highlight">Welcome, Operator.</span>`);
             addLine(`<span class="dim">Type 'help' for commands or 'depth-start' to begin your journey</span>`);
             addLine('');
         }
