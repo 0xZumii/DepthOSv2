@@ -361,31 +361,102 @@
         async function loadUserData() {
             if (!currentUser) return;
             
-            const docRef = db.collection('users').doc(currentUser.uid);
-            const doc = await docRef.get();
-            
-            if (doc.exists) {
-                userData = { ...userData, ...doc.data() };
-                // Check and update streak
-                await checkStreak();
-            } else {
-                // New user - create document
-                userData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
-                userData.lastActiveDate = new Date().toISOString().split('T')[0];
-                await docRef.set(userData);
+            try {
+                const docRef = db.collection('users').doc(currentUser.uid);
+                const doc = await docRef.get();
+                
+                if (doc.exists) {
+                    const firestoreData = doc.data();
+                    // Merge localStorage data with Firestore data
+                    // Use whichever has more journal entries (in case Firestore save failed previously)
+                    const localData = loadFromLocalStorage();
+                    if (localData && localData.journalEntries && 
+                        firestoreData.journalEntries && 
+                        localData.journalEntries.length > firestoreData.journalEntries.length) {
+                        firestoreData.journalEntries = localData.journalEntries;
+                    }
+                    userData = { ...userData, ...firestoreData };
+                    // Ensure journalEntries is always an array
+                    if (!Array.isArray(userData.journalEntries)) {
+                        userData.journalEntries = [];
+                    }
+                    // Check and update streak
+                    await checkStreak();
+                } else {
+                    // Check localStorage for any previous data
+                    const localData = loadFromLocalStorage();
+                    if (localData && localData.journalEntries && localData.journalEntries.length > 0) {
+                        userData = { ...userData, ...localData };
+                    }
+                    // New user - create document
+                    const createData = { ...userData };
+                    createData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+                    createData.lastActiveDate = new Date().toISOString().split('T')[0];
+                    userData.lastActiveDate = createData.lastActiveDate;
+                    await docRef.set(createData);
+                }
+            } catch (error) {
+                console.error('Load error:', error);
+                // Fall back to localStorage
+                const localData = loadFromLocalStorage();
+                if (localData) {
+                    userData = { ...userData, ...localData };
+                    syncStatusEl.textContent = 'offline (local data loaded)';
+                }
             }
+            
+            // Always ensure arrays exist
+            if (!Array.isArray(userData.journalEntries)) userData.journalEntries = [];
+            if (!Array.isArray(userData.achievements)) userData.achievements = [];
+            if (!Array.isArray(userData.completedLayers)) userData.completedLayers = [];
+        }
+
+        // Save to localStorage as backup
+        function saveToLocalStorage() {
+            try {
+                const dataToSave = { ...userData };
+                // Don't store Firestore sentinel values in localStorage
+                if (dataToSave.createdAt && typeof dataToSave.createdAt === 'object' && dataToSave.createdAt.toDate) {
+                    dataToSave.createdAt = dataToSave.createdAt.toDate().toISOString();
+                } else if (dataToSave.createdAt && typeof dataToSave.createdAt !== 'string') {
+                    delete dataToSave.createdAt;
+                }
+                localStorage.setItem('depthos_userData', JSON.stringify(dataToSave));
+            } catch (e) {
+                console.warn('localStorage save failed:', e);
+            }
+        }
+
+        // Load from localStorage (fallback)
+        function loadFromLocalStorage() {
+            try {
+                const saved = localStorage.getItem('depthos_userData');
+                if (saved) {
+                    return JSON.parse(saved);
+                }
+            } catch (e) {
+                console.warn('localStorage load failed:', e);
+            }
+            return null;
         }
 
         // Save user data to Firestore
         async function saveUserData() {
+            // Always save to localStorage as backup
+            saveToLocalStorage();
+
             if (!currentUser) return;
             
             try {
-                await db.collection('users').doc(currentUser.uid).update(userData);
+                // Build clean update object (exclude createdAt to avoid overwriting)
+                const updateData = { ...userData };
+                delete updateData.createdAt;
+                
+                await db.collection('users').doc(currentUser.uid).update(updateData);
                 syncStatusEl.textContent = 'synced ✓';
             } catch (error) {
                 console.error('Save error:', error);
-                syncStatusEl.textContent = 'sync failed';
+                syncStatusEl.textContent = 'sync failed (saved locally)';
             }
         }
 
@@ -525,8 +596,16 @@ CONSCIOUSNESS_LEVEL=expanding`,
 [2024-02-03] Released need for external validation
 [2024-02-14] Embraced vulnerability as strength
 [2024-03-01] Shadow work continues...`,
-            'my_journal.txt': `Your journal entries will appear here.
-Use 'depth-journal' to add new entries.`
+            'my_journal.txt': () => {
+                if (userData.journalEntries.length === 0) {
+                    return `Your journal entries will appear here.\nUse 'depth-journal' to add new entries.`;
+                }
+                return userData.journalEntries.map((e, i) => {
+                    const date = new Date(e.timestamp).toLocaleString();
+                    const type = e.charCount !== undefined ? '[reflection]' : '[journal]';
+                    return `[${date}] ${type}\n${e.text}\n${'─'.repeat(40)}`;
+                }).join('\n\n');
+            }
         };
 
         // Command implementations
@@ -547,6 +626,7 @@ Use 'depth-journal' to add new entries.`
   depth-earn        How to earn $DEPTH tokens
   depth-manifest    Display the Depth Manifesto
   depth-journal     Add a journal entry (+10 $DEPTH)
+  depth-entries     View your saved journal entries
   depth-reflect     Daily reflection prompt (+25 $DEPTH)
   depth-stats       View your growth statistics
 
@@ -615,6 +695,36 @@ Write what's true for you right now.
 
 <span class="cyan">What's alive in you today?</span>
 <span class="dim">(Type your entry and press Enter. Min 20 characters for $DEPTH reward)</span>
+`;
+            },
+
+            'depth-entries': () => {
+                if (userData.journalEntries.length === 0) {
+                    return `
+<span class="highlight">JOURNAL ENTRIES</span>
+<span class="dim">━━━━━━━━━━━━━━━</span>
+
+<span class="dim">No entries yet. Use 'depth-journal' or 'depth-reflect' to start writing.</span>
+`;
+                }
+                
+                const entries = userData.journalEntries.map((e, i) => {
+                    const date = new Date(e.timestamp).toLocaleString();
+                    const type = e.charCount !== undefined ? '<span class="cyan">[reflection]</span>' : '<span class="gold">[journal]</span>';
+                    const words = e.wordCount ? `${e.wordCount} words` : `${e.charCount} chars`;
+                    return `<span class="dim">#${i + 1} - ${date}</span> ${type}
+${e.text}
+<span class="dim">${words}</span>
+<span class="dim">─────────────────────────────────────</span>`;
+                }).join('\n\n');
+                
+                return `
+<span class="highlight">JOURNAL ENTRIES</span> <span class="dim">(${userData.journalEntries.length} total)</span>
+<span class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+${entries}
+
+<span class="dim">Your truth, documented. Keep writing.</span>
 `;
             },
 
@@ -2450,10 +2560,11 @@ The protocol knows when you're faking it.
                     return `<span class="error">cat: missing operand</span>`;
                 }
                 const content = files[filename];
-                if (!content) {
+                if (content === undefined || content === null) {
                     return `<span class="error">cat: ${filename}: No such file or directory</span>`;
                 }
-                return content;
+                // Support dynamic file content (functions)
+                return typeof content === 'function' ? content() : content;
             }
         };
 
@@ -2472,6 +2583,9 @@ The protocol knows when you're faking it.
                     wordCount: input.split(' ').length
                 };
                 userData.journalEntries.push(entry);
+                
+                // Save immediately after adding entry
+                await saveUserData();
                 
                 const isFirstEntry = userData.journalEntries.length === 1;
                 wizardState = null;
@@ -2514,6 +2628,10 @@ The protocol knows when you're faking it.
                     charCount
                 };
                 userData.journalEntries.push(reflection);
+                
+                // Save immediately after adding reflection
+                await saveUserData();
+                
                 wizardState = null;
                 
                 await logActivity('reflection', { charCount });
@@ -2552,6 +2670,7 @@ The protocol knows when you're faking it.
   • <span class="gold">depth-token</span>     - $DEPTH tokenomics
   • <span class="gold">depth-earn</span>      - How to earn $DEPTH
   • <span class="gold">depth-journal</span>   - Add journal entry
+  • <span class="gold">depth-entries</span>   - View saved entries
   • <span class="gold">depth-reflect</span>   - Daily reflection
   • <span class="gold">depth-stats</span>     - Your growth stats
   • <span class="gold">depth-manifest</span>  - The manifesto
